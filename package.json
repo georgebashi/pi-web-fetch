@@ -1,0 +1,23 @@
+{
+  "name": "pi-web-fetch",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pi extension that fetches web pages via headless Chrome, extracts content via trafilatura, and optionally processes with an LLM",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'",
+    "check": "echo 'nothing to check'"
+  },
+  "dependencies": {
+    "puppeteer": "^24.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
