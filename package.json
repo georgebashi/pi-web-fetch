@@ -1,23 +1,32 @@
 {
   "name": "pi-web-fetch",
-  "private": true,
   "version": "1.0.0",
-  "description": "Pi extension that fetches web pages via headless Chrome, extracts content via trafilatura, and optionally processes with an LLM",
+  "description": "Pi extension: fetch web pages via headless Chrome, extract content with trafilatura, and optionally process with an LLM",
   "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/georgebashi/pi-web-fetch"
+  },
+  "author": "georgebashi",
+  "license": "MIT",
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
   "pi": {
     "extensions": [
       "./index.ts"
     ]
   },
-  "scripts": {
-    "clean": "echo 'nothing to clean'",
-    "build": "echo 'nothing to build'",
-    "check": "echo 'nothing to check'"
-  },
   "dependencies": {
     "puppeteer": "^24.0.0"
   },
-  "devDependencies": {
-    "typescript": "^5.9.3"
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
   }
 }
