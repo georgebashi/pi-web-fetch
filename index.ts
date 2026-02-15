@@ -434,9 +434,7 @@ export default function (pi: ExtensionAPI) {
 	// Dependency check on session start
 	pi.on("session_start", async (_event, ctx) => {
 		const runner = await detectPythonRunner(pi.exec.bind(pi));
-		if (runner) {
-			ctx.ui.notify(`web_fetch: using ${runner.label} for trafilatura`, "info");
-		} else {
+		if (!runner) {
 			ctx.ui.notify(
 				"web_fetch: no Python tool runner found. Install one of: uv (recommended), pipx, or pip-run",
 				"error",
