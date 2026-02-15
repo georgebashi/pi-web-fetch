@@ -1,6 +1,6 @@
 {
   "name": "pi-web-fetch",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Pi extension: fetch web pages via headless Chrome, extract content with trafilatura, and optionally process with an LLM",
   "type": "module",
   "keywords": [
