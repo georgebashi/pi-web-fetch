@@ -215,6 +215,10 @@ async function fetchPage(
 		let crossHostRedirect: string | null = null;
 
 		page.on("response", (response) => {
+			// Only track redirects for the main navigation request, not sub-resources
+			// (scripts, images, analytics, etc. often redirect cross-host)
+			if (!response.request().isNavigationRequest()) return;
+
 			const status = response.status();
 			if (status >= 300 && status < 400) {
 				const location = response.headers()["location"];
