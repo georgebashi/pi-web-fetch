@@ -1,12 +1,35 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Text, Markdown } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import puppeteer from "puppeteer";
+
+// Re-export public types for extension authors
+export type {
+	WebFetchExtension,
+	HookContext,
+	HookResult,
+	AfterFetchHookContext,
+	AfterExtractHookContext,
+	SummarizeHookContext,
+	ToolContent,
+} from "./types.js";
+
+import type {
+	WebFetchExtension,
+	HookContext,
+	HookResult,
+	AfterFetchHookContext,
+	AfterExtractHookContext,
+	SummarizeHookContext,
+} from "./types.js";
+import { createHookContext } from "./types.js";
+import { ExtensionRegistry } from "./registry.js";
 
 // --- Config ---
 
@@ -15,6 +38,8 @@ interface WebFetchConfig {
 	model?: string;
 	/** Thinking level for the sub-agent. Defaults to the current session thinking level. */
 	thinkingLevel?: string;
+	/** Custom directory path for local extensions. Defaults to ~/.pi/extensions/web-fetch/ */
+	extensionsDir?: string;
 }
 
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "web-fetch.json");
@@ -29,6 +54,100 @@ function loadConfig(): WebFetchConfig {
 }
 
 const config: WebFetchConfig = loadConfig();
+
+const registry = new ExtensionRegistry();
+
+// --- Extension Loading ---
+
+type NotifyFn = (message: string, level: "info" | "warning" | "error") => void;
+
+/**
+ * Load built-in extensions from the extensions/ directory relative to this file.
+ */
+async function loadBuiltInExtensions(notify: NotifyFn): Promise<void> {
+	const thisDir = dirname(fileURLToPath(import.meta.url));
+	const extensionsDir = join(thisDir, "extensions");
+
+	if (!existsSync(extensionsDir)) {
+		return;
+	}
+
+	const files = readdirSync(extensionsDir).filter(
+		(f) => f.endsWith(".ts") || f.endsWith(".js"),
+	);
+
+	for (const file of files) {
+		try {
+			const modulePath = join(extensionsDir, file);
+			const mod = await import(modulePath);
+			const factory = mod.default;
+			if (typeof factory !== "function") {
+				notify(`web-fetch: built-in extension ${file} has no default export function, skipping`, "warning");
+				continue;
+			}
+			const ext: WebFetchExtension = factory();
+			if (!ext.name || !ext.matches) {
+				notify(`web-fetch: built-in extension ${file} missing name or matches, skipping`, "warning");
+				continue;
+			}
+			registry.addBuiltIn(ext);
+		} catch (err: any) {
+			notify(`web-fetch: failed to load built-in extension ${file}: ${err.message}`, "error");
+		}
+	}
+}
+
+/**
+ * Load local extensions from a user directory.
+ */
+async function loadLocalExtensions(extensionsDir: string, notify: NotifyFn): Promise<void> {
+	if (!existsSync(extensionsDir)) {
+		return;
+	}
+
+	const files = readdirSync(extensionsDir).filter(
+		(f) => f.endsWith(".ts") || f.endsWith(".js"),
+	);
+
+	for (const file of files) {
+		try {
+			const modulePath = join(extensionsDir, file);
+			const mod = await import(modulePath);
+			const factory = mod.default;
+			if (typeof factory !== "function") {
+				notify(`web-fetch: local extension ${file} has no default export function, skipping`, "warning");
+				continue;
+			}
+			const ext: WebFetchExtension = factory();
+			if (!ext.name || !ext.matches) {
+				notify(`web-fetch: local extension ${file} missing name or matches, skipping`, "warning");
+				continue;
+			}
+			registry.addLocal(ext);
+		} catch (err: any) {
+			notify(`web-fetch: failed to load local extension ${file}: ${err.message}`, "error");
+		}
+	}
+}
+
+/**
+ * Set up event bus registration for Pi extensions.
+ * Subscribes to web-fetch:register and validates incoming payloads.
+ */
+function setupEventBusRegistration(pi: ExtensionAPI): void {
+	pi.events.on("web-fetch:register", (data: unknown) => {
+		const ext = data as WebFetchExtension;
+		if (!ext || typeof ext !== "object") {
+			console.error("web-fetch: received invalid registration on web-fetch:register (not an object)");
+			return;
+		}
+		if (!ext.name || !ext.matches || !Array.isArray(ext.matches)) {
+			console.error("web-fetch: received registration missing required fields (name, matches)");
+			return;
+		}
+		registry.addEventBus(ext);
+	});
+}
 
 // --- Constants ---
 
@@ -435,7 +554,7 @@ async function runSubAgent(
 export default function (pi: ExtensionAPI) {
 	let cleanupInterval: ReturnType<typeof setInterval> | null = null;
 
-	// Dependency check on session start
+	// Dependency check and extension loading on session start
 	pi.on("session_start", async (_event, ctx) => {
 		const runner = await detectPythonRunner(pi.exec.bind(pi));
 		if (!runner) {
@@ -444,6 +563,19 @@ export default function (pi: ExtensionAPI) {
 				"error",
 			);
 		}
+
+		// 1. Subscribe to event bus registrations (persistent for session lifetime)
+		setupEventBusRegistration(pi);
+
+		// 2. Load built-in extensions
+		await loadBuiltInExtensions(ctx.ui.notify.bind(ctx.ui));
+
+		// 3. Load local extensions
+		const localDir = config.extensionsDir || join(homedir(), ".pi", "extensions", "web-fetch");
+		await loadLocalExtensions(localDir, ctx.ui.notify.bind(ctx.ui));
+
+		// 4. Signal readiness to other Pi extensions
+		pi.events.emit("web-fetch:ready", undefined);
 
 		// Start cache cleanup interval
 		cleanupInterval = setInterval(cleanupCache, CACHE_CLEANUP_INTERVAL_MS);
@@ -501,53 +633,71 @@ export default function (pi: ExtensionAPI) {
 			}
 			const url = urlResult.url;
 
-			// 2. Check cache
+			// Find matching extension (if any)
+			const matchedExtension = registry.match(url);
+			const hookCtx = createHookContext(url, { prompt: params.prompt, signal });
+
+			// 2. Check cache (before hooks, since beforeFetch may short-circuit)
 			const cached = getCached(url);
 			if (cached) {
 				onUpdate?.({ content: [{ type: "text", text: "Cache hit — processing..." }] });
-				return await processContent(cached, url, params.prompt, model, thinkingLevel, signal);
+				return await runProcess(cached, url, params.prompt, model, thinkingLevel, matchedExtension, hookCtx, signal, onUpdate);
 			}
 
-			// 3. Fetch page
-			onUpdate?.({ content: [{ type: "text", text: `Fetching ${url}...` }] });
-
-			const fetchResult = await fetchPage(url, signal);
-			if (!fetchResult.ok) {
-				return {
-					content: [{ type: "text", text: (fetchResult as { ok: false; error: string }).error }],
-					isError: true,
-				};
+			// 3. beforeFetch hook — can short-circuit entire pipeline
+			if (matchedExtension?.beforeFetch) {
+				const hookResult = await matchedExtension.beforeFetch(hookCtx);
+				if (hookResult) {
+					return hookResult;
+				}
 			}
 
-			// Handle cross-host redirect
-			if ("redirect" in fetchResult) {
-				const redirectUrl = (fetchResult as { ok: true; redirect: RedirectResult }).redirect.redirectedTo;
-				return {
-					content: [
-						{
-							type: "text",
-							text: `The URL redirected to a different host: ${redirectUrl}\n\nTo fetch the content, make a new web_fetch call with this URL: ${redirectUrl}`,
-						},
-					],
-				};
+			// 4. Fetch page
+			const fetchOuter = await runFetch(url, signal, onUpdate);
+			if (fetchOuter.done) return fetchOuter.result;
+			let html = fetchOuter.html;
+
+			// 5. afterFetch hook — can replace HTML or short-circuit
+			if (matchedExtension?.afterFetch) {
+				const afterFetchCtx: AfterFetchHookContext = { ...hookCtx, html };
+				const hookResult = await matchedExtension.afterFetch(afterFetchCtx);
+				if (hookResult) {
+					if ("content" in hookResult && Array.isArray(hookResult.content)) {
+						// HookResult — short-circuit
+						return hookResult as HookResult;
+					}
+					if ("html" in hookResult && typeof (hookResult as any).html === "string") {
+						// HTML replacement
+						html = (hookResult as { html: string }).html;
+					}
+				}
 			}
 
-			// 4. Extract content
-			onUpdate?.({ content: [{ type: "text", text: "Extracting content..." }] });
+			// 6. Extract content
+			const extractOuter = await runExtract(html, signal, onUpdate);
+			if (extractOuter.done) return extractOuter.result;
+			let markdown = extractOuter.markdown;
 
-			const extractResult = await extractContent(fetchResult.result.html, signal);
-			if (!extractResult.ok) {
-				return {
-					content: [{ type: "text", text: (extractResult as { ok: false; error: string }).error }],
-					isError: true,
-				};
+			// 7. afterExtract hook — can replace markdown or short-circuit
+			if (matchedExtension?.afterExtract) {
+				const afterExtractCtx: AfterExtractHookContext = { ...hookCtx, markdown };
+				const hookResult = await matchedExtension.afterExtract(afterExtractCtx);
+				if (hookResult) {
+					if (typeof hookResult === "string") {
+						// String replacement
+						markdown = hookResult;
+					} else if ("content" in hookResult && Array.isArray(hookResult.content)) {
+						// HookResult — short-circuit
+						return hookResult as HookResult;
+					}
+				}
 			}
 
-			// 5. Store in cache
-			setCache(url, extractResult.markdown);
+			// 8. Store in cache
+			setCache(url, markdown);
 
-			// 6. Process and return
-			return await processContent(extractResult.markdown, url, params.prompt, model, thinkingLevel, signal, onUpdate);
+			// 9. Process and return (with summarize hook support)
+			return await runProcess(markdown, url, params.prompt, model, thinkingLevel, matchedExtension, hookCtx, signal, onUpdate);
 		},
 
 		renderCall(args, theme) {
@@ -582,17 +732,97 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- Internal processing logic ---
+	// --- Pipeline Stage Functions ---
 
-	async function processContent(
+	/**
+	 * Stage: Fetch page via puppeteer.
+	 * Returns either a done result (error/redirect) or the HTML to continue processing.
+	 */
+	async function runFetch(
+		url: string,
+		signal?: AbortSignal,
+		onUpdate?: Parameters<Parameters<typeof pi.registerTool>[0]["execute"]>[3],
+	): Promise<{ done: true; result: any } | { done: false; html: string }> {
+		onUpdate?.({ content: [{ type: "text", text: `Fetching ${url}...` }] });
+
+		const fetchResult = await fetchPage(url, signal);
+		if (!fetchResult.ok) {
+			return {
+				done: true,
+				result: {
+					content: [{ type: "text", text: (fetchResult as { ok: false; error: string }).error }],
+					isError: true,
+				},
+			};
+		}
+
+		// Handle cross-host redirect
+		if ("redirect" in fetchResult) {
+			const redirectUrl = (fetchResult as { ok: true; redirect: RedirectResult }).redirect.redirectedTo;
+			return {
+				done: true,
+				result: {
+					content: [
+						{
+							type: "text",
+							text: `The URL redirected to a different host: ${redirectUrl}\n\nTo fetch the content, make a new web_fetch call with this URL: ${redirectUrl}`,
+						},
+					],
+				},
+			};
+		}
+
+		return { done: false, html: fetchResult.result.html };
+	}
+
+	/**
+	 * Stage: Extract content from HTML via trafilatura.
+	 * Returns either a done result (error) or the markdown to continue processing.
+	 */
+	async function runExtract(
+		html: string,
+		signal?: AbortSignal,
+		onUpdate?: Parameters<Parameters<typeof pi.registerTool>[0]["execute"]>[3],
+	): Promise<{ done: true; result: any } | { done: false; markdown: string }> {
+		onUpdate?.({ content: [{ type: "text", text: "Extracting content..." }] });
+
+		const extractResult = await extractContent(html, signal);
+		if (!extractResult.ok) {
+			return {
+				done: true,
+				result: {
+					content: [{ type: "text", text: (extractResult as { ok: false; error: string }).error }],
+					isError: true,
+				},
+			};
+		}
+
+		return { done: false, markdown: extractResult.markdown };
+	}
+
+	/**
+	 * Stage: Process extracted content — summarize hook, sub-agent, or raw return.
+	 */
+	async function runProcess(
 		markdown: string,
 		url: string,
 		prompt: string | undefined,
 		model: string | undefined,
 		thinkingLevel: string,
+		matchedExtension: WebFetchExtension | null,
+		hookCtx: HookContext,
 		signal?: AbortSignal,
 		onUpdate?: Parameters<Parameters<typeof pi.registerTool>[0]["execute"]>[3],
 	) {
+		// Check summarize hook before sub-agent
+		if (matchedExtension?.summarize) {
+			const summarizeCtx: SummarizeHookContext = { ...hookCtx, markdown };
+			const hookResult = await matchedExtension.summarize(summarizeCtx);
+			if (hookResult) {
+				return hookResult;
+			}
+		}
+
 		// Prompted path — use sub-agent if model available
 		if (prompt && model) {
 			onUpdate?.({ content: [{ type: "text", text: "Processing with LLM..." }] });

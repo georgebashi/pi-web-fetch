@@ -3,6 +3,10 @@
   "version": "1.0.2",
   "description": "Pi extension: fetch web pages via headless Chrome, extract content with trafilatura, and optionally process with an LLM",
   "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "keywords": [
     "pi-package"
   ],
@@ -14,19 +18,31 @@
   "license": "MIT",
   "files": [
     "index.ts",
+    "types.ts",
+    "registry.ts",
+    "extensions/",
     "README.md"
   ],
+  "exports": {
+    ".": "./index.ts",
+    "./types": "./types.ts"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
     ]
   },
   "dependencies": {
+    "picomatch": "^4.0.3",
     "puppeteer": "^24.0.0"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@types/picomatch": "^4.0.2",
+    "vitest": "^4.0.18"
   }
 }
