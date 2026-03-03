@@ -156,7 +156,9 @@ function setupEventBusRegistration(pi: ExtensionAPI): void {
 
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const CACHE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const PAGE_TIMEOUT_MS = 30_000; // 30 seconds
+const PAGE_TIMEOUT_MS = 10_000; // 10 seconds
+const EXTRACT_TIMEOUT_MS = 10_000; // 10 seconds for trafilatura extraction
+const SUBAGENT_TIMEOUT_MS = 10_000; // 10 seconds for LLM sub-agent processing
 const CONTENT_SIZE_THRESHOLD = 50_000; // ~50KB — above this, summarize instead of returning raw
 export const MAX_BATCH_SIZE = 10; // Maximum pages in a single batch call
 
@@ -249,6 +251,42 @@ function killProcess(proc: ReturnType<typeof spawn>): void {
 	setTimeout(() => {
 		if (!proc.killed) proc.kill("SIGKILL");
 	}, 5000);
+}
+
+/**
+ * Race a promise against a timeout. Returns the promise result or rejects with a timeout error.
+ * If a signal is provided, the timeout is also cancelled when the signal aborts.
+ */
+function withTimeout<T>(
+	promise: Promise<T>,
+	ms: number,
+	label: string,
+	signal?: AbortSignal,
+): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => {
+			reject(new Error(`${label} timed out after ${ms / 1000} seconds`));
+		}, ms);
+
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(new Error("Aborted"));
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(err) => {
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				reject(err);
+			},
+		);
+	});
 }
 
 // --- Python Runner Detection ---
@@ -1045,7 +1083,7 @@ export default function (pi: ExtensionAPI) {
 	): Promise<{ done: true; result: any } | { done: false; markdown: string }> {
 		onUpdate?.({ content: [{ type: "text", text: "Extracting content..." }] });
 
-		const extractResult = await extractContent(html, signal);
+		const extractResult = await withTimeout(extractContent(html, signal), EXTRACT_TIMEOUT_MS, "Content extraction", signal).catch((err): { ok: false; error: string } => ({ ok: false, error: err.message }));
 		if (!extractResult.ok) {
 			return {
 				done: true,
@@ -1086,7 +1124,7 @@ export default function (pi: ExtensionAPI) {
 		if (prompt && model) {
 			onUpdate?.({ content: [{ type: "text", text: "Processing with LLM..." }] });
 
-			const agentResult = await runSubAgent(markdown, `${prompt}\n\n${CONTENT_GUARDRAILS}`, model, thinkingLevel, signal);
+			const agentResult = await withTimeout(runSubAgent(markdown, `${prompt}\n\n${CONTENT_GUARDRAILS}`, model, thinkingLevel, signal), SUBAGENT_TIMEOUT_MS, "LLM processing", signal).catch((err): SubAgentError => ({ ok: false, error: err.message }));
 			if (agentResult.ok) {
 				return {
 					content: [{ type: "text", text: agentResult.response }],
@@ -1134,7 +1172,7 @@ export default function (pi: ExtensionAPI) {
 
 		onUpdate?.({ content: [{ type: "text", text: "Page content is large — generating summary..." }] });
 
-		const summaryResult = await runSubAgent(markdown, SUMMARIZE_PROMPT, model, thinkingLevel, signal);
+		const summaryResult = await withTimeout(runSubAgent(markdown, SUMMARIZE_PROMPT, model, thinkingLevel, signal), SUBAGENT_TIMEOUT_MS, "LLM summarization", signal).catch((err): SubAgentError => ({ ok: false, error: err.message }));
 		if (summaryResult.ok) {
 			return {
 				content: [{ type: "text", text: summaryResult.response }],
