@@ -20,6 +20,7 @@
     "index.ts",
     "types.ts",
     "registry.ts",
+    "browser-pool.ts",
     "extensions/",
     "README.md"
   ],

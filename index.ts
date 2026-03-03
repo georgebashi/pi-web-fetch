@@ -7,7 +7,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Text, Markdown } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import puppeteer from "puppeteer";
+import { BrowserPool } from "./browser-pool.js";
 
 // Re-export public types for extension authors
 export type {
@@ -56,6 +56,9 @@ function loadConfig(): WebFetchConfig {
 const config: WebFetchConfig = loadConfig();
 
 const registry = new ExtensionRegistry();
+const MAX_BROWSER_TABS = 6; // Maximum concurrent browser tabs for parallel fetching
+const BROWSER_IDLE_TIMEOUT_MS = 60_000; // Close browser after 60s idle
+const browserPool = new BrowserPool({ maxTabs: MAX_BROWSER_TABS, idleTimeoutMs: BROWSER_IDLE_TIMEOUT_MS });
 
 // --- Extension Loading ---
 
@@ -312,22 +315,12 @@ async function fetchPage(
 	url: string,
 	signal?: AbortSignal,
 ): Promise<{ ok: true; result: FetchResult } | { ok: true; redirect: RedirectResult } | { ok: false; error: string }> {
-	let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+	let page: Awaited<ReturnType<typeof browserPool.acquire>> | null = null;
 
 	try {
 		if (signal?.aborted) return { ok: false, error: "Aborted" };
 
-		browser = await puppeteer.launch({
-			headless: true,
-			executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-		});
-		const page = await browser.newPage();
-
-		// Set up abort handling
-		const onAbort = () => {
-			browser?.close().catch(() => {});
-		};
-		signal?.addEventListener("abort", onAbort, { once: true });
+		page = await browserPool.acquire(signal);
 
 		// Track redirects
 		const requestUrl = new URL(url);
@@ -375,14 +368,12 @@ async function fetchPage(
 		const html = await page.content();
 		const finalUrl = page.url();
 
-		signal?.removeEventListener("abort", onAbort);
-
 		return { ok: true, result: { html, finalUrl } };
 	} catch (err: any) {
 		if (signal?.aborted) return { ok: false, error: "Aborted" };
 		return { ok: false, error: `Browser error: ${err.message}` };
 	} finally {
-		await browser?.close().catch(() => {});
+		if (page) await browserPool.release(page);
 	}
 }
 
@@ -588,6 +579,7 @@ export default function (pi: ExtensionAPI) {
 			cleanupInterval = null;
 		}
 		cache.clear();
+		await browserPool.shutdown();
 	});
 
 	// Register the web_fetch tool
