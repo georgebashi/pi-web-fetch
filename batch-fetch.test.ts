@@ -35,15 +35,15 @@ describe("MAX_BATCH_SIZE", () => {
 
 describe("formatBatchResults", () => {
 	describe("all pages succeed", () => {
-		it("formats single page result", () => {
+		it("returns inner result directly for single page", () => {
 			const pages = [{ url: "https://example.com" }];
 			const results = [fulfilled(okResult("Hello world"))];
 
 			const result = formatBatchResults(pages, results);
 			const text = getText(result);
 
-			expect(text).toContain("--- [1/1] https://example.com ---");
-			expect(text).toContain("Hello world");
+			// Single page: no batch header, just the raw content
+			expect(text).toBe("Hello world");
 		});
 
 		it("formats multiple page results with correct indexing", () => {
@@ -141,7 +141,7 @@ describe("formatBatchResults", () => {
 			expect(text).toContain("Error: Unexpected crash");
 		});
 
-		it("handles rejected promises with non-Error reasons", () => {
+		it("returns error result directly for single rejected page", () => {
 			const pages = [{ url: "https://crash.com" }];
 			const results = [rejected("some string error")];
 
@@ -149,6 +149,7 @@ describe("formatBatchResults", () => {
 			const text = getText(result);
 
 			expect(text).toContain("Error: some string error");
+			expect(result.isError).toBe(true);
 		});
 	});
 
@@ -179,37 +180,33 @@ describe("formatBatchResults", () => {
 	});
 
 	describe("edge cases", () => {
-		it("handles empty content in successful result", () => {
+		it("handles empty content in single-page result", () => {
 			const pages = [{ url: "https://empty.com" }];
 			const results = [fulfilled({ content: [{ type: "text", text: "" }] })];
 
 			const result = formatBatchResults(pages, results);
-			const text = getText(result);
-
-			expect(text).toContain("--- [1/1] https://empty.com ---");
+			// Single page passthrough — returns inner result directly
+			expect(result.content[0].text).toBe("");
 		});
 
-		it("handles missing content array", () => {
+		it("handles missing content array in single-page result", () => {
 			const pages = [{ url: "https://broken.com" }];
 			const results = [fulfilled({ content: [] })];
 
 			const result = formatBatchResults(pages, results);
-			const text = getText(result);
-
-			expect(text).toContain("(no content)");
+			// Single page passthrough — returns inner result directly
+			expect(result.content).toHaveLength(0);
 		});
 
-		it("includes page prompt info in URL header (prompt is not shown, only URL)", () => {
+		it("returns content directly for single page with prompt", () => {
 			const pages = [{ url: "https://example.com", prompt: "Get the title" }];
 			const results = [fulfilled(okResult("Title: Example"))];
 
 			const result = formatBatchResults(pages, results);
 			const text = getText(result);
 
-			// URL appears in header
-			expect(text).toContain("https://example.com");
-			// Content appears in body
-			expect(text).toContain("Title: Example");
+			// Single page passthrough — content returned directly
+			expect(text).toBe("Title: Example");
 		});
 	});
 });

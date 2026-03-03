@@ -604,6 +604,19 @@ export function formatBatchResults(
 	results: PromiseSettledResult<any>[],
 ) {
 	const total = pages.length;
+
+	// Single page: return the result directly without batch header wrapper
+	if (total === 1) {
+		const settled = results[0];
+		if (settled.status === "rejected") {
+			return {
+				content: [{ type: "text", text: `Error: ${settled.reason?.message || String(settled.reason)}` }],
+				isError: true,
+			};
+		}
+		return settled.value;
+	}
+
 	const sections: string[] = [];
 
 	for (let i = 0; i < total; i++) {
@@ -812,8 +825,8 @@ export default function (pi: ExtensionAPI) {
 				return await executeBatch(pages, model, thinkingLevel, signal, onUpdate);
 			}
 
-			// --- Single URL mode ---
-			return await processSingleUrl(params.url!, params.prompt, model, thinkingLevel, signal, onUpdate);
+			// --- Single URL mode — route through batch for unified status view ---
+			return await executeBatch([{ url: params.url!, prompt: params.prompt }], model, thinkingLevel, signal, onUpdate);
 		},
 
 		renderCall(args, theme) {
@@ -840,7 +853,7 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderResult(result, { expanded, isPartial }, theme) {
-			// Batch mode: show per-URL status lines
+			// Show per-URL status lines while in progress
 			const batchDetails = result.details as BatchDetails | undefined;
 			if (isPartial && batchDetails?.pages) {
 				return renderBatchStatus(batchDetails.pages, theme);
